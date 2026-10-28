@@ -6,111 +6,74 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// Servimos la SPA (un único index.html)
-app.get('/', (req, res) => res.sendFile(__dirname + '/index.html'));
+// Servimos la app de Vue compilada
+app.use(express.static('client/dist'));
 
-// Estado de todas las salas:
-// rooms = {
-//   "Prova": {
-//     users:   { socketId: { username, color } },
-//     strokes: [ { color, width, points: [ {x, y}, ... ] } ]
-//   }
-// }
+// Aquí guardamos los usuarios y los trazos de cada sala
 const rooms = {};
-const MAX_STROKES = 500; // buffer de trazos recientes por sala
-
-function randomColor() {
-  return 'hsl(' + Math.floor(Math.random() * 360) + ', 80%, 45%)';
-}
-
-function sendUsers(roomName) {
-  io.to(roomName).emit('room_users', Object.values(rooms[roomName].users));
-}
-
-function sendRoomList() {
-  io.emit('room_list', Object.keys(rooms));
-}
-
-function leaveRoom(socket) {
-  const roomName = socket.data.roomName;
-  if (!roomName) return;
-  delete rooms[roomName].users[socket.id];
-  socket.leave(roomName);
-  socket.to(roomName).emit('user_left', socket.id); // para borrar su cursor
-  sendUsers(roomName);
-  socket.data.roomName = null;
-}
+const colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown'];
 
 io.on('connection', (socket) => {
-  // Nada más conectar le enviamos la lista de salas
-  socket.emit('room_list', Object.keys(rooms));
+  let roomName = null;   // sala de este usuario
+  let stroke = null;     // trazo que está dibujando ahora
 
-  socket.on('join_room', ({ roomName, username }) => {
-    leaveRoom(socket); // por si ya estaba en otra sala
+  socket.on('join_room', (data) => {
+    roomName = data.roomName;
 
-    // Si la sala no existe, se crea
+    // Si la sala no existe la creamos
     if (!rooms[roomName]) {
       rooms[roomName] = { users: {}, strokes: [] };
-      sendRoomList();
     }
-    const room = rooms[roomName];
 
-    room.users[socket.id] = { username, color: randomColor() };
-    socket.data.roomName = roomName;
+    const color = colors[Math.floor(Math.random() * colors.length)];
+    rooms[roomName].users[socket.id] = { username: data.username, color: color };
     socket.join(roomName);
 
-    // Sincronización inicial: le mandamos lo que ya está dibujado
-    socket.emit('init_state', room.strokes);
-    sendUsers(roomName);
+    // Le mandamos lo que ya hay dibujado
+    socket.emit('init_state', rooms[roomName].strokes);
+    io.to(roomName).emit('room_users', Object.values(rooms[roomName].users));
   });
 
-  socket.on('cursor_move', ({ x, y }) => {
-    const roomName = socket.data.roomName;
-    if (!roomName) return;
+  socket.on('cursor_move', (data) => {
     const user = rooms[roomName].users[socket.id];
-    // socket.to(...) = a todos los de la sala MENOS a mí (sin eco)
     socket.to(roomName).emit('cursor_move', {
-      id: socket.id, username: user.username, color: user.color, x, y
+      id: socket.id, username: user.username, color: user.color, x: data.x, y: data.y
     });
   });
 
-  socket.on('draw_begin', ({ x, y, color, width }) => {
-    const roomName = socket.data.roomName;
-    if (!roomName) return;
+  socket.on('draw_begin', (data) => {
+    stroke = { color: data.color, width: data.width, points: [{ x: data.x, y: data.y }] };
+    rooms[roomName].strokes.push(stroke);
 
-    // Guardamos el trazo en el buffer de la sala
-    const stroke = { color, width, points: [{ x, y }] };
-    socket.data.stroke = stroke;
-    const strokes = rooms[roomName].strokes;
-    strokes.push(stroke);
-    if (strokes.length > MAX_STROKES) strokes.shift();
+    // Solo guardamos los últimos 500 trazos
+    if (rooms[roomName].strokes.length > 500) {
+      rooms[roomName].strokes.shift();
+    }
 
-    socket.to(roomName).emit('draw_begin', { id: socket.id, x, y, color, width });
+    socket.to(roomName).emit('draw_begin', { id: socket.id, ...data });
   });
 
-  socket.on('draw_move', ({ x, y }) => {
-    const roomName = socket.data.roomName;
-    if (!roomName || !socket.data.stroke) return;
-    socket.data.stroke.points.push({ x, y });
-    socket.to(roomName).emit('draw_move', { id: socket.id, x, y });
+  socket.on('draw_move', (data) => {
+    stroke.points.push({ x: data.x, y: data.y });
+    socket.to(roomName).emit('draw_move', { id: socket.id, x: data.x, y: data.y });
   });
 
   socket.on('draw_end', () => {
-    const roomName = socket.data.roomName;
-    if (!roomName) return;
-    socket.data.stroke = null;
-    socket.to(roomName).emit('draw_end', { id: socket.id });
+    stroke = null;
   });
 
   socket.on('clear_canvas', () => {
-    const roomName = socket.data.roomName;
-    if (!roomName) return;
     rooms[roomName].strokes = [];
-    io.to(roomName).emit('clear_canvas'); // io.to = a todos, incluido yo
+    io.to(roomName).emit('clear_canvas');
   });
 
-  socket.on('leave_room', () => leaveRoom(socket));
-  socket.on('disconnect', () => leaveRoom(socket));
+  socket.on('disconnect', () => {
+    if (!roomName) return;
+    delete rooms[roomName].users[socket.id];
+    io.to(roomName).emit('room_users', Object.values(rooms[roomName].users));
+    io.to(roomName).emit('user_left', socket.id);
+  });
 });
 
-server.listen(3000, () => console.log('PaintRooms en http://localhost:3000'));
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log('Servidor en http://localhost:' + PORT));

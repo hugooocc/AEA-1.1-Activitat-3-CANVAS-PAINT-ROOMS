@@ -1,0 +1,17 @@
+# Dependencias (se reinstalan con npm install)
+node_modules/
+
+# Build de Vue (se genera con npm run build)
+client/dist/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Variables de entorno
+.env
+
+# Sistema / editor
+.DS_Store
+Thumbs.db
+.vscode/
